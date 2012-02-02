@@ -19,6 +19,8 @@ module Rainman
       @all ||= []
     end
 
+    attr_accessor :parent_driver
+
     # Public: Registered handlers.
     #
     # Keys are the handler name (eg: :my_handler); values are the handler
@@ -62,7 +64,7 @@ module Rainman
 
       begin
         set_current_handler name
-        yield current_handler_instance.runner
+        yield self
       ensure
         set_current_handler old_handler
       end
@@ -99,6 +101,12 @@ module Rainman
     # Returns the Symbol name of the current handler or nothing.
     def set_current_handler(name)
       @current_handler = name
+    end
+
+    # Returns the Symbol name of the current handler, or default handler if
+    # a current handler is not set.
+    def current_handler
+      (parent_driver && parent_driver.current_handler) || @current_handler || @default_handler
     end
 
     private
@@ -144,14 +152,6 @@ module Rainman
       end
     end
 
-    # Private: Get the current handler in use by this Driver.
-    #
-    # Returns the Symbol name of the current handler, or default handler if
-    # a current handler is not set.
-    def current_handler
-      @current_handler || @default_handler
-    end
-
     # Private: Register a handler for use with the current Driver.
     #
     # If a block is given it is evaluated within the context of the handler
@@ -171,9 +171,7 @@ module Rainman
         :class_name => "#{self.name}::#{name.to_s.camelize}"
       )
 
-      klass = opts[:class_name].to_s.constantize
-
-      handlers[name] = inject_handler_methods(klass, name.to_sym)
+      handlers[name] = opts[:class_name].to_s.constantize
     end
 
     # Private: Create a new namespace.
@@ -194,50 +192,32 @@ module Rainman
     def namespace(name, opts = {}, &block)
       raise MissingBlock, :namespace unless block_given?
 
+      parent_driver = self
+
       create_method(name) do
         key = "@#{name}"
 
-        if instance_variable_defined?(key)
-          ns = instance_variable_get(key)
-        else
-          ns = instance_variable_set(key, {})
-        end
+        unless instance_variable_defined?(key)
+          mod = Module.new do 
+            extend Driver
 
-        unless ns[current_handler]
-          mod = Module.new do
-            extend self
-            extend ActionMethods
-            class << self
-              attr_accessor :current_handler_instance
+            self.parent_driver = parent_driver
+
+            parent_driver.handlers.each do |handler_key, handler_class|
+              handler_class_name = "#{handler_class}::#{name.to_s.camelize}"
+              register_handler handler_key, :class_name => handler_class_name
             end
+
+
           end
 
-          klass = current_handler_instance.class.const_get(name.to_s.camelize)
-          mod.current_handler_instance = inject_handler_methods(klass, name).new
-
           mod.instance_eval(&block)
-          ns[current_handler] = mod
+
+          instance_variable_set key, mod
         end
 
-        ns[current_handler]
+        instance_variable_get key
       end
-    end
-
-    # Private: Injects Handler methods into the given class/module.
-    #
-    # base           - The base Class/Module.
-    # handler_name   - The Symbol name of the handler class.
-    #
-    # Example
-    #
-    #   inject_handler_methods(SomeHandler, :some_handler)
-    #
-    # Returns base Class/Module.
-    def inject_handler_methods(base, handler_name)
-      base.extend(Handler)
-      base.instance_variable_set(:@handler_name, handler_name)
-      base.instance_variable_set(:@parent_klass, self)
-      base
     end
 
     # These methods are used to create handler actions.
@@ -261,7 +241,7 @@ module Rainman
       def define_action(name, opts = {})
         create_method(name) do |*args, &block|
           method = opts[:delegate_to] || name
-          current_handler_instance.runner.send(method, *args, &block)
+          current_handler_instance.send(method, *args, &block)
         end
 
         alias_method opts[:alias], name if opts[:alias]
